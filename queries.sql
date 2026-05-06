@@ -179,3 +179,206 @@ GROUP BY
     s.substance_id, 
     s.substance_name
 ORDER BY allergic_patients_count DESC;
+
+/* Q8 */
+/*Αντικαταστήστε την ημερομηνία και το τμήμα με τα επιθυμητά*/
+SELECT p.amka, p.first_name, p.last_name, p.personnel_type
+FROM personnel p
+WHERE p.amka NOT IN (
+    /* Υποερώτημα: Βρίσκει όσους ΕΧΟΥΝ βάρδια τη συγκεκριμένη μέρα στο συγκεκριμένο τμήμα*/
+    SELECT sa.personnel_amka
+    FROM shift_assignment sa
+    JOIN department_shift ds ON sa.shift_id = ds.shift_id
+    WHERE ds.shift_date = '2026-05-20' 
+      AND ds.department_id = 1
+);
+
+/* Q9 */
+/* Χρήση CTE (Common Table Expression) για να υπολογίσουμε τις μέρες ανά ασθενή/έτος */
+WITH PatientYearlyDays AS (
+    SELECT 
+        patient_amka,
+        YEAR(admission_ts) AS hosp_year,
+        /* Αν δεν έχει πάρει εξιτήριο, μετράμε μέχρι τη σημερινή μέρα */
+        SUM(DATEDIFF(IFNULL(discharge_ts, CURRENT_TIMESTAMP), admission_ts)) AS total_days
+    FROM hospitalization
+    GROUP BY patient_amka, YEAR(admission_ts)
+    HAVING total_days > 15
+)
+/* Self Join για να βρούμε τα ζευγάρια (ή ομάδες) ασθενών που έχουν ακριβώς τις ίδιες μέρες */
+SELECT 
+    p1.patient_amka AS patient_A, 
+    p2.patient_amka AS patient_B, 
+    p1.total_days, 
+    p1.hosp_year
+FROM PatientYearlyDays p1
+JOIN PatientYearlyDays p2 
+    ON p1.total_days = p2.total_days 
+    AND p1.hosp_year = p2.hosp_year 
+    AND p1.patient_amka < p2.patient_amka /* Χρήση '<' για να μην πάρουμε διπλότυπα ζεύγη (πχ Α-Β και Β-Α) */
+ORDER BY p1.total_days DESC, p1.hosp_year;
+
+/* Q10 */
+WITH PatientSubstances AS (
+    /* Βρίσκουμε όλες τις διακριτές ουσίες ανά νοσηλεία και ασθενή*/
+    SELECT DISTINCT pr.hosp_id, pr.patient_amka, das.substance_id, asub.substance_name
+    FROM prescription pr
+    JOIN drug_active_substance das ON pr.drug_id = das.drug_id
+    JOIN active_substance asub ON das.substance_id = asub.substance_id
+)
+SELECT 
+    ps1.substance_name AS substance_1,
+    ps2.substance_name AS substance_2,
+    COUNT(*) AS co_occurrence_count
+FROM PatientSubstances ps1
+JOIN PatientSubstances ps2 
+    ON ps1.hosp_id = ps2.hosp_id 
+    AND ps1.patient_amka = ps2.patient_amka
+    /* Χρήση '<' για να διασφαλίσουμε μοναδικά ζεύγη */
+    AND ps1.substance_id < ps2.substance_id 
+GROUP BY ps1.substance_name, ps2.substance_name
+ORDER BY co_occurrence_count DESC
+LIMIT 3;
+
+/* Q11 */
+WITH DoctorSurgeries AS (
+    SELECT chief_surgeon_amka, COUNT(procedure_event_id) AS num_surgeries
+    FROM procedure_event
+    WHERE YEAR(start_ts) = YEAR(CURRENT_DATE())
+    GROUP BY chief_surgeon_amka
+),
+MaxSurgeries AS (
+    SELECT MAX(num_surgeries) AS max_surg FROM DoctorSurgeries
+)
+SELECT ds.chief_surgeon_amka, ds.num_surgeries, ms.max_surg
+FROM DoctorSurgeries ds
+CROSS JOIN MaxSurgeries ms
+WHERE ds.num_surgeries <= (ms.max_surg - 5)
+ORDER BY ds.num_surgeries DESC;
+
+/* Q12 */
+/* Αντικαταστήστε την ημερομηνία της εβδομάδας που θέλετε να ελέγξετε */
+SELECT 
+    ds.department_id, 
+    d.department_name, 
+    ds.shift_date, 
+    ds.shift_type,
+    p.personnel_type,
+    doc.specialization,
+    n.degree AS nurse_rank,
+    a.admin_role,
+    COUNT(sa.personnel_amka) AS assigned_count
+FROM department_shift ds
+JOIN department d ON ds.department_id = d.department_id
+JOIN shift_assignment sa ON ds.shift_id = sa.shift_id
+JOIN personnel p ON sa.personnel_amka = p.amka
+/* Left joins για να πάρουμε τα ειδικά χαρακτηριστικά της κάθε υποκλάσης */
+LEFT JOIN doctor doc ON p.amka = doc.amka
+LEFT JOIN nurse n ON p.amka = n.amka
+LEFT JOIN administrative_staff a ON p.amka = a.amka
+WHERE YEARWEEK(ds.shift_date, 1) = YEARWEEK('2026-05-20', 1)
+GROUP BY 
+    ds.department_id, d.department_name, ds.shift_date, ds.shift_type,
+    p.personnel_type, doc.specialization, n.degree, a.admin_role
+ORDER BY ds.department_id, ds.shift_date, ds.shift_type;
+
+/* Q13 */
+/*Απαιτείται Recursive CTE */
+WITH RECURSIVE SupervisorHierarchy AS (
+    /*Base Case: Ο ιατρός και ο άμεσος επόπτης του */
+    SELECT 
+        amka AS original_doctor_amka,
+        amka AS current_doctor_amka,
+        supervisor_amka,
+        1 AS hierarchy_level
+    FROM doctor
+    WHERE supervisor_amka IS NOT NULL
+
+    UNION ALL
+
+    /* Recursive Step: Βρίσκουμε τον επόπτη του επόπτη */
+    SELECT 
+        sh.original_doctor_amka,
+        d.amka AS current_doctor_amka,
+        d.supervisor_amka,
+        sh.hierarchy_level + 1
+    FROM SupervisorHierarchy sh
+    JOIN doctor d ON sh.supervisor_amka = d.amka
+    WHERE d.supervisor_amka IS NOT NULL
+)
+SELECT 
+    sh.original_doctor_amka,
+    p1.first_name AS doc_first_name,
+    p1.last_name AS doc_last_name,
+    sh.supervisor_amka,
+    p2.first_name AS sup_first_name,
+    p2.last_name AS sup_last_name,
+    d2.doctor_rank AS sup_rank,
+    sh.hierarchy_level
+FROM SupervisorHierarchy sh
+JOIN personnel p1 ON sh.original_doctor_amka = p1.amka
+JOIN doctor d2 ON sh.supervisor_amka = d2.amka
+JOIN personnel p2 ON d2.amka = p2.amka
+ORDER BY sh.original_doctor_amka, sh.hierarchy_level;
+
+/* Q14 */
+WITH YearlyICD AS (
+    SELECT 
+        admission_icd10_code AS icd10,
+        YEAR(admission_ts) AS adm_year,
+        COUNT(*) AS num_admissions
+    FROM hospitalization
+    GROUP BY admission_icd10_code, YEAR(admission_ts)
+    HAVING COUNT(*) >= 5
+)
+SELECT 
+    y1.icd10, 
+    i.icd10_description,
+    y1.adm_year AS year_1,
+    y2.adm_year AS year_2,
+    y1.num_admissions
+FROM YearlyICD y1
+JOIN YearlyICD y2 
+    ON y1.icd10 = y2.icd10 
+    AND y1.num_admissions = y2.num_admissions 
+    AND y2.adm_year = y1.adm_year + 1 /* Συνεχόμενα έτη */
+JOIN icd10_diagnosis i ON y1.icd10 = i.icd10_code
+ORDER BY y1.num_admissions DESC, y1.icd10;
+
+/* Q15 */
+/* Εφόσον δεν υπάρχει ρητό πεδίο referred_department_id στον πίνακα emergency_visit που δώσατε, 
+συνδέουμε έμμεσα την επίσκεψη στο triage με τον πίνακα νοσηλείας του ίδιου ασθενή εφόσον η 
+εισαγωγή έγινε εντός 24 ωρών από την επίσκεψη */
+WITH VisitData AS (
+    SELECT 
+        ev.visit_id, 
+        ev.emergency_level,
+        /* Υπολογισμός χρόνου αναμονής σε λεπτά */
+        TIMESTAMPDIFF(MINUTE, ev.arrival_ts, ev.service_start_ts) AS wait_time_mins,
+        ev.disposition,
+        h.department_id,
+        d.department_name
+    FROM emergency_visit ev
+    /*Σύνδεση με νοσηλεία εάν προέκυψε νοσηλεία (εντός 24 ωρών)*/
+    LEFT JOIN hospitalization h 
+        ON ev.patient_amka = h.patient_amka 
+        AND h.admission_ts >= ev.arrival_ts 
+        AND h.admission_ts <= DATE_ADD(ev.arrival_ts, INTERVAL 24 HOUR)
+    LEFT JOIN department d ON h.department_id = d.department_id
+)
+SELECT 
+    emergency_level,
+    COUNT(DISTINCT visit_id) AS total_visits,
+    ROUND(AVG(wait_time_mins), 2) AS avg_wait_time_mins,
+    /* Ποσοστό περιστατικών που οδήγησαν σε νοσηλεία */
+    ROUND(SUM(CASE WHEN disposition = 'HOSPITALIZED' THEN 1 ELSE 0 END) / COUNT(DISTINCT visit_id) * 100, 2) AS hosp_percentage,
+    /* Κατανομή παραπομπών: Το τμήμα και πόσες φορές δέχτηκε ασθενείς αυτού του επιπέδου */
+    IFNULL(department_name, 'NO_ADMISSION') AS referred_department,
+    COUNT(department_id) AS referrals_count
+FROM VisitData
+GROUP BY emergency_level, department_name
+ORDER BY emergency_level, referrals_count DESC;
+
+
+
+
